@@ -20,95 +20,102 @@ SMTP_PORT = 587
 df = pd.read_excel("contacts.xlsx")
 
 
-def create_message(first_name, last_name, recipient_email,
-                   designation, committee, institution, theme, track):
+def create_message(name, recipient_email):
 
     msg = MIMEMultipart("related")
     msg["From"] = EMAIL_USER
     msg["To"] = recipient_email
-    msg["Subject"] = f"Invitation to join as the {str(designation).title()} – INDIS 2026"
-
-    # Handle possible empty values safely
-    designation = str(designation).strip()
-    committee = str(committee).strip()
-    theme = str(theme).strip()
-    track = str(track).strip()
+    msg["Subject"] = "Invitation to Participate – INDIS 2026 | IIT Guwahati"
 
     body = f"""
 <html>
 <body style="margin:0; padding:0; font-family:Aptos, Calibri, Arial, sans-serif; font-size:12pt; color:#000000; line-height:1.5;">
 
-<p>Dear {str(first_name).title()} {str(last_name).title()},</p>
+<p>Dear Prof. {str(name).title()},</p>
 
-"""
-
-    # Conditional section for Theme / Track
-    if designation.lower() == "theme chair" and theme:
-        body += f"""
 <p>
-I am writing to invite you to serve as the <strong>{designation.title()}</strong>
-for the theme <strong>{theme}</strong> of the <strong>International Conference on Design and Innovation Studies (INDIS 2026)</strong>,
-to be hosted by the Department of Design, Indian Institute of Technology Guwahati.
-</p>
-"""
-    elif designation.lower() == "track chair" and track:
-        body += f"""
-<p>
-I am writing to invite you to serve as the <strong>{designation.title()}</strong>
-for <strong>{track}</strong> for the <strong>International Conference on Design and Innovation Studies (INDIS 2026)</strong>,
-to be hosted by the Department of Design, Indian Institute of Technology Guwahati.
-</p>
-"""
-
-    body += f"""
-<p>
-INDIS 2026 is being established as a focused international platform for scholarly
-work at the intersection of design, innovation, technology, and society.
-The conference will bring together academic researchers and industry practitioners
-through keynote sessions, peer-reviewed paper presentations, and curated academic discussions.
-The event will be organized alongside <strong>Asia Design Week</strong>, providing a broader
-international context for academic and professional exchange.
+Greetings from the Department of Design, Indian Institute of Technology Guwahati.
 </p>
 
 <p>
-The conference will feature peer-reviewed contributions in the form of full papers,
-case studies and industry papers, research-through-design contributions, and posters.
-Accepted papers will be published in the Springer conference proceedings (ISBN),
-with selected papers considered for journal publication.
+We are pleased to invite you and your colleagues to participate in 
+<strong>INDIS 2026 – International Conference on Design and Innovation Studies</strong>, 
+to be held at IIT Guwahati from <strong>28–30 September 2026</strong>. 
+The conference aims to bring together researchers, scholars, practitioners, 
+and industry experts to explore <strong>design-led innovation for sustainable and inclusive futures</strong>.
 </p>
 
 <p>
-Your presence as the {designation.title()} would play an important role in guiding the
-academic direction and long-term development of the conference. We would greatly value
-your support in strengthening the scholarly profile and international reach of INDIS.
+INDIS 2026 will feature research presentations, student exhibitions, and industry engagement, 
+and will be held alongside <strong>Asia Design Week</strong>, creating a vibrant platform for 
+international collaboration and knowledge exchange.
 </p>
 
 <p>
-I am attaching the conference poster for your reference. I would appreciate it if you
-could kindly circulate it within your academic and professional networks to help us
-reach a wider community of scholars and practitioners.
+We particularly encourage <strong>faculty members, researchers, and doctoral scholars</strong> 
+to submit <strong>original research contributions</strong>. The conference invites submissions 
+in the following categories:
+</p>
+
+<ul>
+<li>Full Research Papers</li>
+<li>Case Studies & Industry Papers</li>
+<li>Research-through-Design (RtD)</li>
+<li>Posters / Short Papers</li>
+</ul>
+
+<p>
+All submissions will undergo a <strong>double-blind peer review process</strong> and accepted 
+papers will be published in the <strong>Springer Proceedings</strong>, with selected papers 
+invited for journal publication.
+</p>
+
+<p><strong>Important Dates</strong><br>
+Portal Opens: 5 April 2026<br>
+Submission Deadline: 15 April 2026
 </p>
 
 <p>
-Further details are available at: <br>
+We would greatly appreciate it if you could:
+</p>
+
+<ol>
+<li>Consider submitting your research work to the conference.</li>
+<li>Share this call for papers with colleagues and research scholars in your department and network.</li>
+<li>Follow and engage with the conference updates on LinkedIn:<br>
+<a href="https://www.linkedin.com/company/indis-2026-international-conference-on-design-and-innovation-studies/">
+https://www.linkedin.com/company/indis-2026-international-conference-on-design-and-innovation-studies/
+</a>
+</li>
+</ol>
+
+<p>
+The conference website with full details can be accessed here:<br>
 <a href="https://event.iitg.ac.in/indis2026/" style="color:#1155cc; text-decoration:underline;">
 https://event.iitg.ac.in/indis2026/
 </a>
 </p>
 
 <p>
-I hope you will be willing to support this initiative.
+Please find the <strong>conference poster attached</strong> for your reference and circulation.
 </p>
 
 <p>
-Warm regards,<br>
-Prof. Pratul Chandra Kalita
+We look forward to your participation and to welcoming you to IIT Guwahati for INDIS 2026.
 </p>
 
-<p style="margin-bottom:5px;">
-<em>On behalf of</em><br>
+<p>
+Warm regards,<br><br>
+Dr. Debayan Dhar
+<br>
+Vice-Chair INDIS 2026
+<br>
+Email: <a href="mailto:indis2026@iitg.ac.in">indis2026@iitg.ac.in</a><br>
+Conference Website: 
+<a href="https://event.iitg.ac.in/indis2026/">https://event.iitg.ac.in/indis2026/</a>
 </p>
-
+<br>
+On behalf of
 <hr style="border:none; border-top:1px solid #cfcfcf; margin:8px 0;">
 
 <img src="cid:signature_image" style="display:block; max-width:40%; height:auto;">
@@ -126,10 +133,10 @@ Prof. Pratul Chandra Kalita
         mime_img.add_header("Content-Disposition", "inline", filename="signature.png")
         msg.attach(mime_img)
 
-    # Attach poster file (PNG properly named)
-    with open("poster.png", "rb") as file:
-        part = MIMEApplication(file.read(), Name="INDIS_2026_Poster.png")
-        part["Content-Disposition"] = 'attachment; filename="INDIS_2026_Poster.png"'
+    # Attach poster
+    with open("poster.pdf", "rb") as file:
+        part = MIMEApplication(file.read(), Name="INDIS_2026_Poster.pdf")
+        part["Content-Disposition"] = 'attachment; filename="INDIS_2026_Poster.pdf"'
         msg.attach(part)
 
     return msg
@@ -142,14 +149,8 @@ def send_emails():
 
     for _, row in df.iterrows():
         msg = create_message(
-            row["First Name"],
-            row["Last Name"],
-            row["Email"],
-            row["Designation"],
-            row["Committee"],
-            row["Institution"],
-            row["Theme"],
-            row["Track"]
+            row["Name"],
+            row["Email"]
         )
         server.send_message(msg)
         print(f"Sent to {row['Email']}")
