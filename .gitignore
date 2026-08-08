@@ -206,6 +206,13 @@ cython_debug/
 contacts.xlsx
 contacts2.xlsx
 
+# Generated dry-run mails (author emails + confidential reviewer comments)
+preview/
+
+#dB
+official/
+test/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
