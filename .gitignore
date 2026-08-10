@@ -213,6 +213,9 @@ preview/
 official/
 test/
 
+#Logs
+sent_log.csv
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

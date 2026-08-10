@@ -24,7 +24,7 @@ SMTP_PORT = 587
 
 # Nothing is sent while this is True: every mail is written to PREVIEW_DIR
 # instead and SMTP is never contacted. Flip to False only for the real run.
-DRY_RUN = True
+DRY_RUN = False
 PREVIEW_DIR = "preview"
 
 # Every successful send is appended here, and papers already listed are skipped
@@ -579,7 +579,10 @@ def create_message(record):
     msg["To"] = ", ".join(record["to"])
     if record["cc"]:
         msg["Cc"] = ", ".join(record["cc"])
-    msg["Subject"] = decision["subject"]
+    # The Paper ID goes in both the subject and the body: several authors have
+    # more than one submission, and without it two letters - sometimes an
+    # acceptance and a rejection - are indistinguishable.
+    msg["Subject"] = f"{decision['subject']} (Paper ID {record['paper_id']})"
 
     reviews_html = "".join(
         f"""
@@ -595,6 +598,7 @@ def create_message(record):
 <html>
 <body style="margin:0; padding:0; font-family:Aptos, Calibri, Arial, sans-serif; font-size:12pt; color:#000000; line-height:1.5;">
 {GREETING}
+<p><strong>Paper ID: {html.escape(record["paper_id"])}</strong></p>
 {decision["opening"]}
 {ACCEPTANCE_BLOCK if decision["acceptance"] else ""}
 {SIGN_OFF}
