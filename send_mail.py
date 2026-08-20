@@ -39,6 +39,11 @@ META_REVIEWS_FILE = "official/MetaReviews.xlsx"
 REVIEWS_FILE = "official/Reviews.xlsx"
 PAPERS_FILE = "official/Papers.xlsx"
 
+# Short papers / not-full-papers: one flat list of Paper IDs covering every
+# track. Anything listed here is never mailed, whatever its meta-review says.
+# Set to "" to run with no exclusion list at all.
+EXCLUDED_PAPERS_FILE = "official/shortPaper.xlsx"
+
 EMAIL_PATTERN = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
 
 # Dates and links quoted in the letters.
@@ -456,19 +461,56 @@ def load_papers():
     return papers, tracks, warnings
 
 
+def load_excluded_papers():
+    """Paper IDs that must never be mailed, from the short-paper list.
+
+    This one fails closed. A missing file or a sheet without a 'Paper ID'
+    column raises instead of yielding an empty set: silently mailing an author
+    who was meant to be excluded is far worse than refusing to run.
+    """
+    if not EXCLUDED_PAPERS_FILE:
+        return set()
+    if not os.path.exists(EXCLUDED_PAPERS_FILE):
+        raise FileNotFoundError(
+            f"exclusion list {EXCLUDED_PAPERS_FILE!r} not found - "
+            'set EXCLUDED_PAPERS_FILE = "" to run without one'
+        )
+
+    excluded, found_header = set(), False
+    for rows in read_worksheets(EXCLUDED_PAPERS_FILE):
+        _, columns, data = split_header(rows)
+        if not columns:
+            continue
+        found_header = True
+        paper_id_col = require_column(columns, "Paper ID")
+        for row in data:
+            paper_id = row.get(paper_id_col, "")
+            if paper_id:
+                excluded.add(paper_id)
+
+    if not found_header:
+        raise KeyError(
+            f"no 'Paper ID' column found in {EXCLUDED_PAPERS_FILE!r} - "
+            "refusing to run with an empty exclusion list"
+        )
+    return excluded
+
+
 def build_records():
     """Join the three files.
 
-    Returns (records, skipped, incomplete, warnings):
+    Returns (records, skipped, incomplete, warnings, excluded):
       records    - papers present in all three files that can be mailed
       skipped    - in all three, but unmailable (no template, no usable address)
       incomplete - present in only one or two files, so never mailed
       warnings   - mailable, but something about the data is worth a look
+      excluded   - listed in the short-paper file, so deliberately not mailed
     """
     meta_reviews, meta_tracks, warnings = load_meta_reviews()
     reviews, review_tracks, review_warnings = load_reviews()
     papers, paper_tracks, paper_warnings = load_papers()
     warnings = warnings + review_warnings + paper_warnings
+    excluded_ids = load_excluded_papers()
 
     def track_of(paper_id):
         for source in (meta_tracks, review_tracks, paper_tracks):
@@ -480,6 +522,11 @@ def build_records():
     common = set(meta_reviews) & set(reviews) & set(papers)
 
     for paper_id in sorted(common, key=paper_sort_key):
+        # The exclusion list outranks everything else - check it before the
+        # decision, so a listed paper is never mailed whatever its outcome.
+        if paper_id in excluded_ids:
+            continue
+
         meta_review = meta_reviews[paper_id]
         track = track_of(paper_id)
         decision = DECISIONS.get(meta_review["recommendation"])
@@ -529,6 +576,10 @@ def build_records():
     }
     incomplete = []
     for paper_id in sorted(set().union(*present_in.values()) - common, key=paper_sort_key):
+        # Excluded papers are reported under the exclusion list only, so they
+        # are never counted twice.
+        if paper_id in excluded_ids:
+            continue
         found = [name for name, ids in present_in.items() if paper_id in ids]
         missing = [name for name in present_in if name not in found]
         incomplete.append({
@@ -539,7 +590,21 @@ def build_records():
             "reason": "missing from " + ", ".join(missing),
         })
 
-    return records, skipped, incomplete, warnings
+    # Account for every listed id, so a typo in the exclusion file is visible
+    # rather than looking like a paper that was quietly dropped.
+    everywhere = set().union(*present_in.values())
+    excluded = []
+    for paper_id in sorted(excluded_ids, key=paper_sort_key):
+        if paper_id in common:
+            state = "blocked - would otherwise have been mailed"
+        elif paper_id in everywhere:
+            state = "listed, but not mailable anyway (missing from " + ", ".join(
+                name for name, ids in present_in.items() if paper_id not in ids) + ")"
+        else:
+            state = "listed, but not present in any of the three files"
+        excluded.append(note(paper_id, track_of(paper_id), state))
+
+    return records, skipped, incomplete, warnings, excluded
 
 
 def resolve_recipients(paper):
@@ -671,8 +736,19 @@ def write_report(name, rows, fieldnames):
     return path
 
 
-def report_data_issues(skipped, incomplete, warnings):
+def report_data_issues(skipped, incomplete, warnings, excluded=()):
     """Print every paper that will not be mailed, with its track, and save it."""
+    if excluded:
+        blocked = [e for e in excluded if e["reason"].startswith("blocked")]
+        print(f"\nSHORT-PAPER EXCLUSION LIST ({len(excluded)} id(s) listed, "
+              f"{len(blocked)} actually blocked):")
+        for entry in blocked:
+            print(f"  paper {entry['paper_id']:>6s} | {entry['track']} | BLOCKED")
+        others = [e for e in excluded if e not in blocked]
+        if others:
+            print(f"  {len(others)} listed id(s) were not mailable anyway "
+                  f"or are not in this batch - see {PREVIEW_DIR}/_excluded.csv")
+
     if incomplete:
         print(f"\nNOT IN ALL THREE FILES - not mailed ({len(incomplete)}):")
         grouped = defaultdict(list)
@@ -696,6 +772,12 @@ def report_data_issues(skipped, incomplete, warnings):
             print(f"  paper {entry['paper_id']:>6s} | {entry['track']} | {entry['reason']}")
 
     paths = []
+    if excluded:
+        paths.append(write_report(
+            "_excluded.csv",
+            [[e["paper_id"], e["track"], e["reason"]] for e in excluded],
+            ["Paper ID", "Track", "Status"],
+        ))
     if incomplete:
         paths.append(write_report(
             "_incomplete.csv",
@@ -739,7 +821,7 @@ def append_sent_log(record, msg):
 
 
 def send_emails():
-    records, skipped, incomplete, warnings = build_records()
+    records, skipped, incomplete, warnings, excluded = build_records()
 
     counts = defaultdict(int)
     for record in records:
@@ -751,7 +833,7 @@ def send_emails():
     for recommendation, count in sorted(counts.items()):
         print(f"  {recommendation:30s} {count:3d}")
 
-    report_paths = report_data_issues(skipped, incomplete, warnings)
+    report_paths = report_data_issues(skipped, incomplete, warnings, excluded)
 
     if DRY_RUN:
         summary_path = write_previews(records)
