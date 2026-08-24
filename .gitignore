@@ -208,6 +208,7 @@ contacts2.xlsx
 
 # Generated dry-run mails (author emails + confidential reviewer comments)
 preview/
+preview_short/
 
 #dB
 official/
@@ -215,6 +216,7 @@ test/
 
 #Logs
 sent_log.csv
+sent_log_short.csv
 
 # Marimo
 marimo/_static/
