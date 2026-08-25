@@ -34,13 +34,21 @@ from send_mail import (
 
 # Nothing is sent while this is True: every mail is written to PREVIEW_DIR
 # instead and SMTP is never contacted. Flip to False only for the real run.
-DRY_RUN = True
-PREVIEW_DIR = "preview_reminder"
+DRY_RUN = False
 
-SENT_LOG = "sent_log_reminder.csv"
+# Previews, the sent log and every report all live together under here.
+REMINDER_LOG_DIR = "reminder_logs"
+PREVIEW_DIR = REMINDER_LOG_DIR
+SENT_LOG = os.path.join(REMINDER_LOG_DIR, "sent_log_reminder.csv")
 REQUIRE_CONFIRMATION = True
 
 CONSOLIDATED_FILE = "official/Consolidated.xlsx"
+
+# Only short papers get this reminder. Matched case-insensitively against the
+# "Paper Type" column. An accepted paper whose type is neither this nor a full
+# paper is reported rather than dropped in silence.
+SHORT_PAPER_TYPES = {"short paper"}
+FULL_PAPER_TYPES = {"full paper"}
 
 # Only these recommendations get a reminder. Compared case-insensitively after
 # stripping, so "ACCEPTED" and "accepted" both match.
@@ -65,14 +73,32 @@ BODY = f"""
 <p>Dear Authors,</p>
 
 <p>
-A gentle reminder to kindly complete your
-<strong>author registration by {REGISTRATION_DEADLINE}</strong> to confirm your
-participation and secure your paper&rsquo;s presentation slot at INDIS 2026.
+A gentle reminder to kindly complete your author registration by
+{REGISTRATION_DEADLINE} to confirm your participation and secure your
+paper&rsquo;s presentation slot at INDIS 2026.
 </p>
 
 <p>
-We look forward to welcoming you to IIT Guwahati on
-<strong>{CONFERENCE_DATES}</strong>.
+Please note that this deadline applies to short papers, and
+{REGISTRATION_DEADLINE} is a hard deadline for completing author registration.
+No extensions may be possible beyond this date.
+</p>
+
+<p>
+We would also like to emphasize that the accepted papers need to be submitted
+for the final proceedings within the stipulated timeline. If you are unable to
+complete the registration and submit the required paper within the deadline, we
+may have to reallocate your presentation slot and finalize the conference
+programme and proceedings submission.
+</p>
+
+<p>
+We therefore request you to complete the registration and submission process at
+the earliest to avoid any inconvenience.
+</p>
+
+<p>
+We look forward to welcoming you to IIT Guwahati from {CONFERENCE_DATES}.
 </p>
 
 <p>
@@ -150,10 +176,16 @@ def load_papers():
     """-> (accepted paper records, skipped, warnings, decision counts)."""
     if not os.path.exists(CONSOLIDATED_FILE):
         directory = os.path.dirname(CONSOLIDATED_FILE) or "."
-        present = sorted(os.listdir(directory)) if os.path.isdir(directory) else []
+        # Only spreadsheets, and only a handful - listing a whole Downloads
+        # folder back at someone helps nobody.
+        nearby = sorted(
+            name for name in (os.listdir(directory) if os.path.isdir(directory) else [])
+            if name.lower().endswith((".xlsx", ".xls", ".xlsm", ".csv"))
+        )
+        hint = ", ".join(nearby[:10]) + (" ..." if len(nearby) > 10 else "")
         raise FileNotFoundError(
             f"consolidated workbook not found at {CONSOLIDATED_FILE!r}.\n"
-            f"  {directory} contains: {present}\n"
+            f"  spreadsheets in {directory}: {hint or '(none)'}\n"
             f"  Fix the name, or update CONSOLIDATED_FILE at the top of this file."
         )
 
@@ -163,6 +195,13 @@ def load_papers():
     decision_col = find_column(columns, "Recommendation")
     track_col = columns.get("Track")
     title_col = columns.get("Paper Title")
+    type_col = columns.get("Paper Type")
+    if type_col is None:
+        # Without it every accepted paper would look like a short paper.
+        raise KeyError(
+            f"no 'Paper Type' column in {CONSOLIDATED_FILE!r} - cannot tell short "
+            "papers from full papers, so refusing to guess who to remind"
+        )
     # Who the decision mail went to. Blank for papers not yet mailed, in which
     # case the reminder goes to the primary contact alone.
     sent_to_col = next(
@@ -176,6 +215,9 @@ def load_papers():
     address_log = []
     # Accept-like decisions that do not match ACCEPTED_DECISIONS exactly.
     unrecognised_accepts = defaultdict(list)
+    # Paper types among accepted papers, and the ones we could not classify.
+    type_counts = defaultdict(int)
+    unrecognised_types = defaultdict(list)
     # lower-cased address -> the one spelling actually mailed.
     spellings = {}
 
@@ -191,6 +233,18 @@ def load_papers():
             # and those authors would never learn they had to register.
             if "accept" in decision.lower():
                 unrecognised_accepts[decision].append(row.get(paper_id_col, ""))
+            continue
+
+        # Accepted - now keep only the short papers.
+        paper_type = (row.get(type_col, "") if type_col else "").strip()
+        type_counts[paper_type or "(blank)"] += 1
+        if paper_type.lower() not in SHORT_PAPER_TYPES:
+            if paper_type.lower() not in FULL_PAPER_TYPES:
+                # Neither "Short Paper" nor "Full Paper" - could be a short
+                # paper under another name, so say so instead of dropping it.
+                unrecognised_types[paper_type or "(blank)"].append(
+                    row.get(paper_id_col, "")
+                )
             continue
 
         track = row.get(track_col, "") if track_col else ""
@@ -282,7 +336,8 @@ def load_papers():
             "cc": ordered[1:],
         })
 
-    return papers, skipped, warnings, counts, address_log
+    return (papers, skipped, warnings, counts, address_log,
+            type_counts, unrecognised_types)
 
 
 def build_records():
@@ -298,7 +353,8 @@ def build_records():
     every accepted paper into a set and send each address its own mail. That
     also means no Cc, so nobody's address is exposed to anyone else.
     """
-    papers, skipped, warnings, counts, address_log = load_papers()
+    (papers, skipped, warnings, counts, address_log,
+     type_counts, unrecognised_types) = load_papers()
 
     people = {}
     for paper in papers:
@@ -326,7 +382,8 @@ def build_records():
         records.append(person)
     records.sort(key=lambda record: record["to"][0].lower())
 
-    return records, papers, skipped, warnings, counts, address_log
+    return (records, papers, skipped, warnings, counts, address_log,
+            type_counts, unrecognised_types)
 
 
 def write_address_log(address_log, records, sent_addresses=None):
@@ -421,7 +478,8 @@ def write_previews(records):
     )
 
 
-def report(records, papers, skipped, warnings, counts):
+def report(records, papers, skipped, warnings, counts,
+           type_counts=None, unrecognised_types=None):
     print("Decisions in the consolidated sheet:")
     for decision, count in sorted(counts.items(), key=lambda item: -item[1]):
         if decision.lower() in ACCEPTED_DECISIONS:
@@ -432,7 +490,23 @@ def report(records, papers, skipped, warnings, counts):
             mark = ""
         print(f"  {count:4d}  {decision!r:32s} {mark}")
 
-    print(f"\nAccepted papers        : {len(papers)}")
+    if type_counts:
+        print("\nPaper types among accepted papers:")
+        for paper_type, count in sorted(type_counts.items(), key=lambda i: -i[1]):
+            if paper_type.lower() in SHORT_PAPER_TYPES:
+                mark = "-> reminder"
+            elif paper_type.lower() in FULL_PAPER_TYPES:
+                mark = "(full paper - no reminder)"
+            else:
+                mark = "*** UNRECOGNISED TYPE - NO REMINDER, CHECK THIS"
+            print(f"  {count:4d}  {paper_type!r:28s} {mark}")
+
+    if unrecognised_types:
+        print("\nAccepted papers whose type is neither Short nor Full - not mailed:")
+        for paper_type, ids in unrecognised_types.items():
+            print(f"  {paper_type!r}: papers {', '.join(ids)}")
+
+    print(f"\nAccepted SHORT papers  : {len(papers)}")
     print(f"Reminders to send      : {len(records)} (one per person)")
 
     # Prove both guarantees rather than assuming them.
@@ -491,6 +565,7 @@ def load_sent_log():
 def append_sent_log(record, msg):
     """One row per (recipient, paper) - a person with four accepted papers
     appears four times, so the log can be read paper-by-paper."""
+    os.makedirs(os.path.dirname(SENT_LOG) or ".", exist_ok=True)
     is_new = not os.path.exists(SENT_LOG)
     timestamp = datetime.now().isoformat(timespec="seconds")
     with open(SENT_LOG, "a", encoding="utf-8", newline="") as handle:
@@ -511,8 +586,10 @@ def append_sent_log(record, msg):
 
 
 def send_emails():
-    records, papers, skipped, warnings, counts, address_log = build_records()
-    report_paths = report(records, papers, skipped, warnings, counts)
+    (records, papers, skipped, warnings, counts, address_log,
+     type_counts, unrecognised_types) = build_records()
+    report_paths = report(records, papers, skipped, warnings, counts,
+                          type_counts, unrecognised_types)
 
     if address_log:
         dropped = sum(1 for e in address_log if not e["used"])
