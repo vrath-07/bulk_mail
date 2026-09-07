@@ -42,13 +42,19 @@ PREVIEW_DIR = REMINDER_LOG_DIR
 SENT_LOG = os.path.join(REMINDER_LOG_DIR, "sent_log_reminder.csv")
 REQUIRE_CONFIRMATION = True
 
-CONSOLIDATED_FILE = "official/Consolidated.xlsx"
+SOURCE_FILE = "official/short_paper.xlsx"
 
-# Only short papers get this reminder. Matched case-insensitively against the
-# "Paper Type" column. An accepted paper whose type is neither this nor a full
-# paper is reported rather than dropped in silence.
-SHORT_PAPER_TYPES = {"short paper"}
-FULL_PAPER_TYPES = {"full paper"}
+# Which "Paper Type" values receive this mail, matched case-insensitively.
+# OTHER_KNOWN_TYPES are the ones we deliberately skip; anything in neither set
+# is reported rather than dropped in silence.
+PAPER_TYPES_TO_MAIL = {"short paper"}
+OTHER_KNOWN_TYPES = {"full paper"}
+
+# True  -> only papers whose "Submissions" column says "No" are mailed, and the
+#          source file must have that column.
+# False -> submission status is ignored (use when the export has no such
+#          column, as with fullPaper.xlsx).
+ONLY_UNSUBMITTED = False
 
 # Only these recommendations get a reminder. Compared case-insensitively after
 # stripping, so "ACCEPTED" and "accepted" both match.
@@ -59,12 +65,14 @@ ACCEPTED_DECISIONS = {
     "accepted",
 }
 
-REGISTRATION_DEADLINE = "25 August 2026"
-CONFERENCE_DATES = "28–30 September 2026"
+# Plain text, no markup - this one is quoted in the body only, but keeping it
+# free of HTML means it is also safe to use in the subject.
+FORM_DEADLINE = "9 September"
 
-# The reminder text has no subject line of its own; this one is written to
-# match it. Change it here if you would rather word it differently.
-SUBJECT = f"INDIS 2026 – Reminder: Author Registration by {REGISTRATION_DEADLINE}"
+POSTER_FORM_LINK = ("https://docs.google.com/forms/d/e/"
+                    "1FAIpQLScHY2mCQllYrLhx9nDowb9aR70ZYRrcSz1vrAIIqoOnjTZTwA/viewform")
+
+SUBJECT = "Resharing of Poster Submission Link"
 
 BODY = f"""
 <html>
@@ -73,38 +81,25 @@ BODY = f"""
 <p>Dear Authors,</p>
 
 <p>
-A gentle reminder to kindly complete your author registration by
-{REGISTRATION_DEADLINE} to confirm your participation and secure your
-paper&rsquo;s presentation slot at INDIS 2026.
+We have received several queries regarding the poster submission link.
+Therefore, we are sharing the link again for your convenience.
 </p>
 
 <p>
-Please note that this deadline applies to short papers, and
-{REGISTRATION_DEADLINE} is a hard deadline for completing author registration.
-No extensions may be possible beyond this date.
+Poster Submission Link:
+<a href="{POSTER_FORM_LINK}">{POSTER_FORM_LINK}</a>
 </p>
 
 <p>
-We would also like to emphasize that the accepted papers need to be submitted
-for the final proceedings within the stipulated timeline. If you are unable to
-complete the registration and submit the required paper within the deadline, we
-may have to reallocate your presentation slot and finalize the conference
-programme and proceedings submission.
+Please note that all other information remains unchanged, including the
+submission deadline of {FORM_DEADLINE}.
 </p>
 
 <p>
-We therefore request you to complete the registration and submission process at
-the earliest to avoid any inconvenience.
-</p>
-
-<p>
-We look forward to welcoming you to IIT Guwahati from {CONFERENCE_DATES}.
-</p>
-
-<p>
-Warm regards,<br>
-<strong>INDIS 2026 Organising Committee</strong><br>
-Department of Design, IIT Guwahati
+With regards,<br>
+INDIS 2026 Organising Committee<br>
+Indian Institute of Technology Guwahati<br>
+Guwahati, Assam, India
 </p>
 
 </body>
@@ -116,7 +111,25 @@ Department of Design, IIT Guwahati
 # Reading the consolidated workbook
 # ---------------------------------------------------------------------------
 
-def consolidated_rows():
+def split_header_by_author_email(rows):
+    """Return (track, column-name -> index, data rows).
+
+    send_mail.split_header finds the header row by an exact 'Paper ID' cell.
+    fullPaper.xlsx puts the sheet title ('Papers Only Submitted') in A1 instead,
+    so key on the author-email column, which every one of these exports has.
+    """
+    for position, row in enumerate(rows):
+        if any("primary contact author email" in str(value).lower()
+               for value in row.values()):
+            track = next(
+                (v for above in rows[:position] for v in above.values() if v), ""
+            )
+            columns = {value: index for index, value in row.items() if value}
+            return track, columns, rows[position + 1:]
+    return "", {}, []
+
+
+def source_rows():
     """Yield (columns, data rows) for the one sheet that holds the paper list.
 
     The workbook has several sheets and three of them start with a 'Paper ID'
@@ -125,26 +138,36 @@ def consolidated_rows():
     that a looser test would happily accept.
     """
     matches = []
-    for rows in read_worksheets(CONSOLIDATED_FILE):
-        _, columns, data = split_header(rows)
+    for rows in read_worksheets(SOURCE_FILE):
+        _, columns, data = split_header_by_author_email(rows)
         if not columns:
             continue
-        if "Paper ID" in columns and any(
-            "primary contact author email" in name.lower() for name in columns
-        ):
+        # Keyed on the author-email column alone: fullPaper.xlsx ships with the
+        # sheet title in A1 instead of a "Paper ID" header, so requiring that
+        # too would reject the only sheet in the book.
+        if any("primary contact author email" in name.lower() for name in columns):
             matches.append((columns, data))
 
     if not matches:
         raise KeyError(
-            f"no sheet in {CONSOLIDATED_FILE!r} has both a 'Paper ID' and a "
+            f"no sheet in {SOURCE_FILE!r} has a "
             "'Primary Contact Author Email' column"
         )
     if len(matches) > 1:
         raise KeyError(
-            f"{len(matches)} sheets in {CONSOLIDATED_FILE!r} look like the paper "
+            f"{len(matches)} sheets in {SOURCE_FILE!r} look like the paper "
             "list; expected exactly one"
         )
     return matches[0]
+
+
+def find_any_column(columns, *needles):
+    """First column matching any needle, most specific first; None if none match."""
+    for needle in needles:
+        for name, index in columns.items():
+            if needle.lower() in name.lower():
+                return index
+    return None
 
 
 def normalise_address(email):
@@ -174,8 +197,8 @@ def normalise_address(email):
 
 def load_papers():
     """-> (accepted paper records, skipped, warnings, decision counts)."""
-    if not os.path.exists(CONSOLIDATED_FILE):
-        directory = os.path.dirname(CONSOLIDATED_FILE) or "."
+    if not os.path.exists(SOURCE_FILE):
+        directory = os.path.dirname(SOURCE_FILE) or "."
         # Only spreadsheets, and only a handful - listing a whole Downloads
         # folder back at someone helps nobody.
         nearby = sorted(
@@ -184,23 +207,44 @@ def load_papers():
         )
         hint = ", ".join(nearby[:10]) + (" ..." if len(nearby) > 10 else "")
         raise FileNotFoundError(
-            f"consolidated workbook not found at {CONSOLIDATED_FILE!r}.\n"
+            f"reminder source workbook not found at {SOURCE_FILE!r}.\n"
             f"  spreadsheets in {directory}: {hint or '(none)'}\n"
-            f"  Fix the name, or update CONSOLIDATED_FILE at the top of this file."
+            f"  Fix the name, or update SOURCE_FILE at the top of this file."
         )
 
-    columns, data = consolidated_rows()
-    paper_id_col = require_column(columns, "Paper ID")
+    columns, data = source_rows()
     primary_col = find_column(columns, "Primary Contact Author Email")
     decision_col = find_column(columns, "Recommendation")
     track_col = columns.get("Track")
     title_col = columns.get("Paper Title")
+
+    # fullPaper.xlsx has the sheet title ("Papers Only Submitted") in A1 where
+    # "Paper ID" belongs, so fall back to the leftmost column and say so.
+    paper_id_col = find_any_column(columns, "Paper ID")
+    id_column_note = None
+    if paper_id_col is None:
+        paper_id_col = min(columns.values())
+        header = next(n for n, i in columns.items() if i == paper_id_col)
+        id_column_note = (
+            f"no 'Paper ID' column - using the first column, headed {header!r}, "
+            "as the paper id"
+        )
+
     type_col = columns.get("Paper Type")
     if type_col is None:
-        # Without it every accepted paper would look like a short paper.
+        # Without it every paper would match whatever type filter is set.
         raise KeyError(
-            f"no 'Paper Type' column in {CONSOLIDATED_FILE!r} - cannot tell short "
-            "papers from full papers, so refusing to guess who to remind"
+            f"no 'Paper Type' column in {SOURCE_FILE!r} - cannot tell paper "
+            "types apart, so refusing to guess who to mail"
+        )
+
+    submission_col = find_any_column(columns, "Submissions", "Submission", "Submitted")
+    if ONLY_UNSUBMITTED and submission_col is None:
+        # Without it everyone would be mailed, including those who have already
+        # submitted - the opposite of what that setting asks for.
+        raise KeyError(
+            f"ONLY_UNSUBMITTED is set but {SOURCE_FILE!r} has no 'Submissions' "
+            "column - cannot tell who has already submitted"
         )
     # Who the decision mail went to. Blank for papers not yet mailed, in which
     # case the reminder goes to the primary contact alone.
@@ -218,6 +262,9 @@ def load_papers():
     # Paper types among accepted papers, and the ones we could not classify.
     type_counts = defaultdict(int)
     unrecognised_types = defaultdict(list)
+    # Submission status among accepted short papers.
+    submission_counts = defaultdict(int)
+    unrecognised_submissions = defaultdict(list)
     # lower-cased address -> the one spelling actually mailed.
     spellings = {}
 
@@ -238,14 +285,27 @@ def load_papers():
         # Accepted - now keep only the short papers.
         paper_type = (row.get(type_col, "") if type_col else "").strip()
         type_counts[paper_type or "(blank)"] += 1
-        if paper_type.lower() not in SHORT_PAPER_TYPES:
-            if paper_type.lower() not in FULL_PAPER_TYPES:
+        if paper_type.lower() not in PAPER_TYPES_TO_MAIL:
+            if paper_type.lower() not in OTHER_KNOWN_TYPES:
                 # Neither "Short Paper" nor "Full Paper" - could be a short
                 # paper under another name, so say so instead of dropping it.
                 unrecognised_types[paper_type or "(blank)"].append(
                     row.get(paper_id_col, "")
                 )
             continue
+
+        # Optionally narrow to those who have not submitted yet.
+        if ONLY_UNSUBMITTED:
+            submitted = row.get(submission_col, "").strip()
+            submission_counts[submitted or "(blank)"] += 1
+            if submitted.lower() != "no":
+                if submitted.lower() != "yes":
+                    # Blank or an unexpected value: we cannot tell whether they
+                    # submitted, and guessing "yes" would silently drop them.
+                    unrecognised_submissions[submitted or "(blank)"].append(
+                        row.get(paper_id_col, "")
+                    )
+                continue
 
         track = row.get(track_col, "") if track_col else ""
         if paper_id in seen_ids:
@@ -336,8 +396,16 @@ def load_papers():
             "cc": ordered[1:],
         })
 
-    return (papers, skipped, warnings, counts, address_log,
-            type_counts, unrecognised_types)
+    stats = {
+        "decisions": counts,
+        "types": type_counts,
+        "submissions": submission_counts,
+        "unrecognised_accepts": unrecognised_accepts,
+        "unrecognised_types": unrecognised_types,
+        "unrecognised_submissions": unrecognised_submissions,
+        "id_column_note": id_column_note,
+    }
+    return papers, skipped, warnings, address_log, stats
 
 
 def build_records():
@@ -353,8 +421,7 @@ def build_records():
     every accepted paper into a set and send each address its own mail. That
     also means no Cc, so nobody's address is exposed to anyone else.
     """
-    (papers, skipped, warnings, counts, address_log,
-     type_counts, unrecognised_types) = load_papers()
+    papers, skipped, warnings, address_log, stats = load_papers()
 
     people = {}
     for paper in papers:
@@ -382,8 +449,7 @@ def build_records():
         records.append(person)
     records.sort(key=lambda record: record["to"][0].lower())
 
-    return (records, papers, skipped, warnings, counts, address_log,
-            type_counts, unrecognised_types)
+    return records, papers, skipped, warnings, address_log, stats
 
 
 def write_address_log(address_log, records, sent_addresses=None):
@@ -478,8 +544,12 @@ def write_previews(records):
     )
 
 
-def report(records, papers, skipped, warnings, counts,
-           type_counts=None, unrecognised_types=None):
+def report(records, papers, skipped, warnings, stats):
+    counts = stats["decisions"]
+    type_counts = stats["types"]
+    unrecognised_types = stats["unrecognised_types"]
+    if stats.get("id_column_note"):
+        print(f"NOTE: {stats['id_column_note']}\n")
     print("Decisions in the consolidated sheet:")
     for decision, count in sorted(counts.items(), key=lambda item: -item[1]):
         if decision.lower() in ACCEPTED_DECISIONS:
@@ -493,10 +563,10 @@ def report(records, papers, skipped, warnings, counts,
     if type_counts:
         print("\nPaper types among accepted papers:")
         for paper_type, count in sorted(type_counts.items(), key=lambda i: -i[1]):
-            if paper_type.lower() in SHORT_PAPER_TYPES:
-                mark = "-> reminder"
-            elif paper_type.lower() in FULL_PAPER_TYPES:
-                mark = "(full paper - no reminder)"
+            if paper_type.lower() in PAPER_TYPES_TO_MAIL:
+                mark = "-> mailed"
+            elif paper_type.lower() in OTHER_KNOWN_TYPES:
+                mark = "(not in PAPER_TYPES_TO_MAIL - no mail)"
             else:
                 mark = "*** UNRECOGNISED TYPE - NO REMINDER, CHECK THIS"
             print(f"  {count:4d}  {paper_type!r:28s} {mark}")
@@ -506,8 +576,24 @@ def report(records, papers, skipped, warnings, counts,
         for paper_type, ids in unrecognised_types.items():
             print(f"  {paper_type!r}: papers {', '.join(ids)}")
 
-    print(f"\nAccepted SHORT papers  : {len(papers)}")
-    print(f"Reminders to send      : {len(records)} (one per person)")
+    if stats["submissions"]:
+        print("\nSubmission status among accepted short papers:")
+        for value, count in sorted(stats["submissions"].items(), key=lambda i: -i[1]):
+            if value.lower() == "no":
+                mark = "-> reminder (not yet submitted)"
+            elif value.lower() == "yes":
+                mark = "(already submitted - no reminder)"
+            else:
+                mark = "*** UNRECOGNISED - NO REMINDER, CHECK THIS"
+            print(f"  {count:4d}  {value!r:16s} {mark}")
+
+    if stats["unrecognised_submissions"]:
+        print("\nAccepted short papers with an unclear submission status - not mailed:")
+        for value, ids in stats["unrecognised_submissions"].items():
+            print(f"  {value!r}: papers {', '.join(ids)}")
+
+    print(f"\nPapers selected        : {len(papers)}")
+    print(f"Mails to send          : {len(records)} (one per person)")
 
     # Prove both guarantees rather than assuming them.
     addresses = [r["to"][0].lower() for r in records]
@@ -586,10 +672,8 @@ def append_sent_log(record, msg):
 
 
 def send_emails():
-    (records, papers, skipped, warnings, counts, address_log,
-     type_counts, unrecognised_types) = build_records()
-    report_paths = report(records, papers, skipped, warnings, counts,
-                          type_counts, unrecognised_types)
+    records, papers, skipped, warnings, address_log, stats = build_records()
+    report_paths = report(records, papers, skipped, warnings, stats)
 
     if address_log:
         dropped = sum(1 for e in address_log if not e["used"])
